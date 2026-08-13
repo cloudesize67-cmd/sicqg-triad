@@ -1,8 +1,13 @@
 """Tests for the Z3 verification gate."""
 
-from sicqg_triad.z3_gate import Z3Gate
+import pytest
+
+from sicqg_triad import z3_gate
+from sicqg_triad.z3_gate import Z3Gate, Z3_AVAILABLE
 
 GATE = Z3Gate()
+
+requires_z3 = pytest.mark.skipif(not Z3_AVAILABLE, reason="z3 not installed")
 
 
 def test_honest_candidate_passes():
@@ -27,6 +32,7 @@ def test_reward_hacking_mutant_is_fatal_with_counterexample():
     assert "result >= 0" in res.counterexample
 
 
+@requires_z3
 def test_input_only_invariant_proven_by_z3():
     code = "def f(x):\n    return x"
     res = GATE.verify_invariants(code, ["x * x >= 0"],
@@ -78,6 +84,7 @@ def test_off_domain_exploit_caught_by_boundary_probes():
     assert any("probe" in line for line in res.proof_log)
 
 
+@requires_z3
 def test_symbolic_proof_of_result_claim_via_z3():
     code = "def f(x):\n    return x * x"
     res = GATE.verify_invariants(code, ["result >= 0"],
@@ -93,6 +100,7 @@ def test_symbolic_result_claim_refuted():
     assert "result >= 0" in res.counterexample
 
 
+@requires_z3
 def test_non_arith_candidate_falls_back_to_concrete_with_note():
     code = "def f(xs):\n    return sorted(xs)[0]"
     res = GATE.verify_invariants(code, ["result <= max(xs)"],
@@ -106,3 +114,26 @@ def test_caller_supplied_probe_inputs():
     res = GATE.verify_invariants(code, ["result >= 0"], [{"x": 1}],
                                  probe_inputs=[{"x": -7}])
     assert not res.passed and res.fatal
+
+
+def test_gate_works_without_z3(monkeypatch):
+    """Module imports and concrete checks still work when z3 is absent."""
+    monkeypatch.setattr(z3_gate, "z3", None)
+    gate = Z3Gate()
+    # concrete checks pass for an honest candidate
+    res = gate.verify_invariants("def f(x):\n    return abs(x)",
+                                 ["result >= 0"],
+                                 [{"x": -5}, {"x": 0}, {"x": 7}])
+    assert res.passed and not res.fatal
+    assert any("z3 unavailable: symbolic proof skipped; concrete checks only"
+               in line for line in res.proof_log)
+    # fatal penalties still work: invariant violators are caught concretely
+    bad = gate.verify_invariants("def f(x):\n    return -1",
+                                 ["result >= 0"], [{"x": 1}])
+    assert not bad.passed and bad.fatal
+    assert bad.counterexample is not None
+    # boundary probes still catch off-domain exploits without z3
+    exploit = gate.verify_invariants(
+        "def f(x):\n    return x if x < 50 else -1", ["result >= 0"],
+        [{"x": i} for i in range(1, 11)])
+    assert not exploit.passed and exploit.fatal
