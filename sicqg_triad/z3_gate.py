@@ -23,7 +23,12 @@ _MAX_PROBES = 64
 # domain spanned by the test inputs, so off-domain exploits are caught).
 _SYMBOLIC_BOUND = 10**6
 
-import z3
+try:
+    import z3
+except ImportError:  # z3-solver is optional (unavailable on Termux/Android)
+    z3 = None
+
+Z3_AVAILABLE = z3 is not None
 
 # Builtins allowed inside candidate code. Nothing that touches I/O, imports,
 # or the interpreter itself.
@@ -418,8 +423,13 @@ class Z3Gate:
                            f"with result={res}")
                     log.append(f"VIOLATED (concrete): {cex}")
                     return GateResult(False, True, cex, log)
-            # 2) z3 refutation
-            if "result" in inv:
+            # 2) z3 refutation (skipped when z3 is not installed)
+            if z3 is None:
+                if not any("z3 unavailable" in line for line in log):
+                    log.append(
+                        "z3 unavailable: symbolic proof skipped; concrete "
+                        "checks only (install z3-solver for formal proofs)")
+            elif "result" in inv:
                 # symbolic check against the candidate's own return expr
                 try:
                     cex = self._check_result_invariant_z3(
