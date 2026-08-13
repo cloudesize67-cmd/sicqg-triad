@@ -27,7 +27,7 @@ in process memory; `TokenSet.__repr__` redacts; the module performs zero file I/
 
 | Module | Role | Key guarantees |
 |---|---|---|
-| `superposition.py` | Variant registry | Append-only JSONL lineage; capacity-bounded pruning; status machine: superposed → dispatched → (fatal \| committed \| pruned) |
+| `superposition.py` | Variant registry | Append-only JSONL lineage; capacity-bounded pruning; status machine: superposed → dispatched → (fatal | committed | pruned) |
 | `router.py` | Adaptive compute routing | `estimate_complexity` → thinking budget; provider protocol with deterministic stub + optional free-tier Gemini (key read from env at call time, never stored) |
 | `sandbox.py` | Execution isolation | rlimits (AS/CPU/NOFILE/FSIZE), scrubbed env, process-group kill on timeout, bwrap → proot → honest-warning confinement ladder; E2B/Modal stubs |
 | `z3_gate.py` | Formal verification gate | Restricted exec namespace (no imports/dunders); concrete invariant checks on test + auto-generated boundary probe inputs; symbolic z3 proof/refutation for single-expression arithmetic candidates; any error = fatal + counterexample |
