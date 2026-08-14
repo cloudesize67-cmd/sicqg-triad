@@ -25,10 +25,11 @@ _SYMBOLIC_BOUND = 10**6
 
 try:
     import z3
-except ImportError:  # z3-solver is optional (unavailable on Termux/Android)
+except ImportError:  # degraded mode: concrete-only checking, noted in logs
     z3 = None
 
-Z3_AVAILABLE = z3 is not None
+# Exception types raised by the z3 binding (empty when z3 is absent).
+_Z3_EXC = (z3.Z3Exception,) if z3 is not None else ()
 
 # Builtins allowed inside candidate code. Nothing that touches I/O, imports,
 # or the interpreter itself.
@@ -49,9 +50,17 @@ _ALLOWED_EXPR_NODES = (
     ast.And, ast.Or, ast.Not, ast.Add, ast.Sub, ast.Mult, ast.Div,
     ast.FloorDiv, ast.Mod, ast.Pow, ast.USub, ast.UAdd,
     ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE,
-    ast.Call,  # only abs/min/max, filtered separately
+    ast.Call,  # only abs/min/max/len, filtered separately
 )
-_ALLOWED_CALLS = {"abs", "min", max.__name__}
+# len() is concrete-only: the symbolic translator raises ValueError for it,
+# so invariants using len fall back to the concrete check (noted in log).
+_ALLOWED_CALLS = {"abs", "min", "max", "len"}
+
+
+def _short(obj, limit: int = 160) -> str:
+    """repr() truncated so array-valued inputs/results don't flood the log."""
+    r = repr(obj)
+    return r if len(r) <= limit else r[:limit] + "...<truncated>"
 
 
 @dataclass
@@ -65,11 +74,24 @@ class GateResult:
 
 
 class Z3Gate:
-    """Verifies candidate code against Z3-checkable invariants."""
+    """Verifies candidate code against Z3-checkable invariants.
+
+    ``allowed_modules``: whitelist of importable module names for candidate
+    code (e.g. ``("numpy",)`` for DSP tasks). When non-empty, the candidate
+    namespace gets a guarded ``__import__`` that resolves ONLY whitelisted
+    top-level modules (whitelisted libraries such as numpy call __import__
+    internally for lazy submodule loads). Everything else remains forbidden.
+    NOTE: relaxing the namespace means isolation must come from the sandbox
+    executor, not the gate namespace.
+    """
+
+    def __init__(self, allowed_modules: tuple[str, ...] = ()) -> None:
+        self.allowed_modules = tuple(allowed_modules)
 
     # ------------------------------------------------------------------ exec
     @staticmethod
-    def _load_callable(code: str, arg_names: list[str], log: list[str]):
+    def _load_callable(code: str, arg_names: list[str], log: list[str],
+                       allowed_modules: tuple[str, ...] = ()):
         """Exec candidate code in a restricted namespace; return its function."""
         ns: dict = {"__builtins__": dict(_SAFE_BUILTINS)}
         if "def " not in code:
@@ -77,14 +99,38 @@ class Z3Gate:
             body = "\n".join("    " + ln for ln in code.splitlines())
             code = f"def _candidate({args}):\n{body}"
         tree = ast.parse(code, mode="exec")
-        # forbid dunder attribute access / imports entirely
+        # forbid dunder attribute access / imports entirely (except whitelist)
         for node in ast.walk(tree):
-            if isinstance(node, (ast.Import, ast.ImportFrom)):
-                raise ValueError("imports are not allowed in candidate code")
+            if isinstance(node, ast.Import):
+                names = {a.name.split(".")[0] for a in node.names}
+                if not names <= set(allowed_modules):
+                    raise ValueError("imports are not allowed in candidate code")
+            elif isinstance(node, ast.ImportFrom):
+                top = (node.module or "").split(".")[0]
+                if top not in allowed_modules:
+                    raise ValueError("imports are not allowed in candidate code")
             if isinstance(node, ast.Attribute) and node.attr.startswith("__"):
                 raise ValueError("dunder attribute access is not allowed")
             if isinstance(node, ast.Name) and node.id.startswith("__"):
                 raise ValueError("dunder name access is not allowed")
+        if allowed_modules:
+            # Relaxed namespace (documented): a guarded __import__ that only
+            # resolves whitelisted top-level modules. Whitelisted libraries
+            # (e.g. numpy) call __import__ internally for lazy submodule
+            # loads, so injecting pre-imported names is not sufficient.
+            # Isolation for such candidates must come from the sandbox.
+            real_import = __import__
+            allowed = set(allowed_modules)
+
+            def _guarded_import(name, *args, **kwargs):
+                if name.split(".")[0] not in allowed:
+                    raise ImportError(
+                        f"module {name!r} not on the gate whitelist")
+                return real_import(name, *args, **kwargs)
+
+            ns["__builtins__"]["__import__"] = _guarded_import
+            log.append(f"guarded __import__ enabled for: "
+                       f"{', '.join(sorted(allowed))}")
         exec(compile(tree, "<candidate>", "exec"), ns)
         funcs = [v for k, v in ns.items()
                  if callable(v) and not k.startswith("__")
@@ -252,6 +298,8 @@ class Z3Gate:
         proven. Raises ValueError when the candidate/invariant is not
         translatable (caller then falls back to concrete-only checking).
         """
+        if z3 is None:
+            raise ValueError("z3 not installed; symbolic path unavailable")
         ret = self._single_return_expr(variant_code, arg_names)
         tree = ast.parse(inv, mode="eval")
         for node in ast.walk(tree):
@@ -286,6 +334,8 @@ class Z3Gate:
         Returns a counterexample string if a violating model exists, else
         None. Raises ValueError if the invariant is not translatable.
         """
+        if z3 is None:
+            raise ValueError("z3 not installed; symbolic path unavailable")
         tree = ast.parse(inv, mode="eval")
         for node in ast.walk(tree):
             if not isinstance(node, _ALLOWED_EXPR_NODES):
@@ -359,7 +409,8 @@ class Z3Gate:
         log: list[str] = []
         arg_names = sorted({k for ti in test_inputs for k in ti})
         try:
-            fn = self._load_callable(variant_code, arg_names, log)
+            fn = self._load_callable(variant_code, arg_names, log,
+                                 self.allowed_modules)
         except Exception as exc:  # never trust code that errors
             log.append(f"FATAL: candidate failed to load: {exc}")
             return GateResult(False, True, f"load error: {exc}", log)
@@ -373,7 +424,7 @@ class Z3Gate:
                 return GateResult(False, True,
                                   f"runtime error on input {ti}: {exc}", log)
             results.append((ti, res))
-            log.append(f"ran {ti} -> {res}")
+            log.append(f"ran {_short(ti)} -> {_short(res)}")
 
         # boundary probes (auto-generated unless caller supplied them)
         if probe_inputs is None:
@@ -386,7 +437,7 @@ class Z3Gate:
                 log.append(f"probe {pi} raised {exc}; skipped")
                 continue
             probe_results.append((pi, res))
-            log.append(f"probed {pi} -> {res}")
+            log.append(f"probed {_short(pi)} -> {_short(res)}")
 
         # bounded domains from observed inputs/results
         domain: dict[str, tuple[int, int]] = {}
@@ -423,18 +474,13 @@ class Z3Gate:
                            f"with result={res}")
                     log.append(f"VIOLATED (concrete): {cex}")
                     return GateResult(False, True, cex, log)
-            # 2) z3 refutation (skipped when z3 is not installed)
-            if z3 is None:
-                if not any("z3 unavailable" in line for line in log):
-                    log.append(
-                        "z3 unavailable: symbolic proof skipped; concrete "
-                        "checks only (install z3-solver for formal proofs)")
-            elif "result" in inv:
+            # 2) z3 refutation
+            if "result" in inv:
                 # symbolic check against the candidate's own return expr
                 try:
                     cex = self._check_result_invariant_z3(
                         variant_code, inv, arg_names, log)
-                except (ValueError, z3.Z3Exception) as exc:
+                except (ValueError,) + _Z3_EXC as exc:
                     log.append(f"note: '{inv}' not symbolically checkable "
                                f"({exc}); concrete check only")
                 else:
