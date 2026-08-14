@@ -90,20 +90,17 @@ python -m pytest tests -q
 
 ```
 pkg install python
-pip install requests pytest   # suffices; z3-solver is optional
+pip install -e .          # z3-solver and requests install from wheels/sdist
+pip install pytest        # dev extra
 python -m pytest tests -q
 python -m sicqg_triad.cli --task demo
 ```
 
-`z3-solver` is an optional extra (`pip install -e .[z3]`) used for formal
-symbolic proofs, and it cannot be installed on Termux/Android (platform
-unsupported by its installer). Without it the gate degrades honestly:
-concrete + boundary-probe checks still catch invariant violators; symbolic
-all-input proofs require z3 on desktop/cloud.
-
 The MAP-Elites archive uses numpy when available and falls back to a small
 pure-python k-means otherwise, so it works on Termux without extra native
-packages.
+packages. Note: the sandbox memory rlimit is disabled on Android due to a
+bionic linker conflict (CPU timeout + file limits still enforced); full
+memory isolation requires the E2B/Modal adapters.
 
 ## Tests
 

@@ -47,6 +47,7 @@ fatally-penalized variants:          8
 2. Symbolic z3 proofs cover single-expression arithmetic candidates; richer code
    gets concrete checking over test + probe inputs only.
 3. `proot` confinement is weak by design (documented in README).
-4. Termux/Android cannot install z3-solver (platform unsupported by its
-   installer); the gate degrades to concrete-only mode there (symbolic
-   proofs skipped, noted explicitly in proof_log).
+4. On Android/bionic (Termux) the sandbox memory rlimit (RLIMIT_AS) is disabled:
+   setting it crashes the child in the bionic linker (CFI shadow check). CPU
+   timeout and file limits are still enforced; full memory isolation requires
+   the E2B/Modal adapters.
