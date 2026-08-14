@@ -61,12 +61,18 @@ class Orchestrator:
         (task, generation, feedback) and returns
         (code, invariants, mutation_op) tuples. When provided, the LLM
         provider is never consulted.
+    descriptor_fn : Callable[[Variant, float], tuple[float, ...]] | None
+        Optional MAP-Elites descriptor override: (variant, train_fitness)
+        -> behavior descriptor tuple. Defaults to squashed train fitness +
+        normalized code length.
     """
 
     def __init__(self, registry, archive, gate, executor, provider,
                  evaluator: Callable[[str, list[int]], float],
                  proposer: Callable[[str, int, list[str]],
-                                    list[tuple[str, list[str], str]]] | None = None):
+                                    list[tuple[str, list[str], str]]] | None = None,
+                 descriptor_fn: Callable[[Variant, float],
+                                         tuple[float, ...]] | None = None):
         self.registry = registry
         self.archive = archive
         self.gate = gate
@@ -74,6 +80,7 @@ class Orchestrator:
         self.provider = provider
         self.evaluator = evaluator
         self.proposer = proposer
+        self.descriptor_fn = descriptor_fn
 
     # ------------------------------------------------------------- stage 1
     def _propose(self, task: str, generation: int, n: int,
@@ -203,10 +210,13 @@ class Orchestrator:
                 fitness = float(self.evaluator(v.code, heldout))
                 v.metadata["fitness_heldout"] = fitness
                 train_fit = float(self.evaluator(v.code, train))
-                descriptors = (
-                    train_fit / (1.0 + abs(train_fit)),  # squashed train fitness
-                    min(len(v.code) / 500.0, 1.0),       # normalized code length
-                )
+                if self.descriptor_fn is not None:
+                    descriptors = tuple(self.descriptor_fn(v, train_fit))
+                else:
+                    descriptors = (
+                        train_fit / (1.0 + abs(train_fit)),  # squashed train fit
+                        min(len(v.code) / 500.0, 1.0),       # norm. code length
+                    )
                 island = int(v.id[:8], 16) % self.archive.n_islands
                 self.archive.add(Elite(variant_id=v.id, fitness=fitness,
                                        descriptors=descriptors, island=island))
