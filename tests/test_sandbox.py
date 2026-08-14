@@ -87,12 +87,17 @@ def test_cloud_stubs_raise_notimplemented():
 
 def test_no_write_outside_temp_dir_or_honest_warning():
     ex = LocalSubprocessExecutor()
-    target = "/tmp/sicqg_escape_probe.txt"
+    # Use the real temp dir: plain /tmp does not exist on Android/Termux.
+    import tempfile
+    target = os.path.join(tempfile.gettempdir(), "sicqg_escape_probe.txt")
     if os.path.exists(target):
         os.unlink(target)
     code = (
         "import os\n"
-        f"open({target!r}, 'w').write('escaped')\n"
+        "try:\n"
+        f"    open({target!r}, 'w').write('escaped')\n"
+        "except OSError:\n"
+        "    pass\n"
         "print(os.getcwd())"
     )
     try:
