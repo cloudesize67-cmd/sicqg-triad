@@ -38,6 +38,16 @@ def _scrub_env() -> dict:
 _NO_CONFINEMENT_WARNING = (
     "WARNING: no filesystem confinement available (install bwrap/proot)")
 
+_NO_MEM_RLIMIT_WARNING = (
+    "WARNING: memory rlimit disabled on Android/bionic (linker CFI "
+    "conflict); CPU/file limits active")
+
+_IS_ANDROID = (
+    ("ANDROID_ROOT" in os.environ)
+    or ("com.termux" in os.environ.get("PREFIX", ""))
+    or (hasattr(os, "uname") and "android" in os.uname().version.lower())
+)
+
 
 def _detect_backend() -> str:
     """Best-available filesystem confinement backend for this host."""
@@ -92,8 +102,12 @@ class LocalSubprocessExecutor:
         return base
 
     def _apply_limits(self) -> None:  # runs in child via preexec_fn
-        mem = self.mem_mb * 1024 * 1024
-        resource.setrlimit(resource.RLIMIT_AS, (mem, mem))
+        if not _IS_ANDROID:
+            # RLIMIT_AS breaks bionic's linker CFI shadow mapping: the child
+            # aborts in the linker before any python code runs. Skip AS (and
+            # DATA) on Android; CPU/file limits still apply.
+            mem = self.mem_mb * 1024 * 1024
+            resource.setrlimit(resource.RLIMIT_AS, (mem, mem))
         resource.setrlimit(resource.RLIMIT_CPU, (self.cpu_s, self.cpu_s))
         resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
         resource.setrlimit(resource.RLIMIT_FSIZE, (16 * 1024 * 1024, 16 * 1024 * 1024))
@@ -122,6 +136,8 @@ class LocalSubprocessExecutor:
                 code_rc = proc.returncode if proc.returncode is not None else -1
                 if self.backend == "none":
                     err = (err or "") + "\n[sandbox] " + _NO_CONFINEMENT_WARNING
+                if _IS_ANDROID:
+                    err = (err or "") + "\n[sandbox] " + _NO_MEM_RLIMIT_WARNING
                 return ExecResult(
                     ok=proc.returncode == 0,
                     stdout=out,
@@ -140,6 +156,8 @@ class LocalSubprocessExecutor:
                 tail = "\n[sandbox] timeout: killed"
                 if self.backend == "none":
                     tail += "\n[sandbox] " + _NO_CONFINEMENT_WARNING
+                if _IS_ANDROID:
+                    tail += "\n[sandbox] " + _NO_MEM_RLIMIT_WARNING
                 return ExecResult(
                     ok=False,
                     stdout=out or "",

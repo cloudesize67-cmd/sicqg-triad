@@ -4,6 +4,7 @@ import time
 import pytest
 
 from sicqg_triad.sandbox import (
+    _IS_ANDROID,
     E2BExecutor,
     ExecResult,
     LocalSubprocessExecutor,
@@ -32,10 +33,19 @@ def test_timeout_kills_infinite_loop():
     assert elapsed < 10  # killed promptly, not left running
 
 
+@pytest.mark.skipif(_IS_ANDROID, reason="memory rlimit disabled on Android/bionic")
 def test_memory_limit_fails_large_allocation():
     ex = LocalSubprocessExecutor(mem_mb=64)
     r = ex.run("x = bytearray(512 * 1024 * 1024); print(len(x))")
     assert not r.ok  # MemoryError / killed under RLIMIT_AS
+
+
+@pytest.mark.skipif(not _IS_ANDROID, reason="Android-only memory rlimit warning")
+def test_android_memory_rlimit_warning_in_stderr():
+    r = LocalSubprocessExecutor().run("print('hi')")
+    assert r.ok
+    assert ("memory rlimit disabled on Android/bionic "
+            "(linker CFI conflict); CPU/file limits active") in r.stderr
 
 
 def test_temp_dir_removed():
