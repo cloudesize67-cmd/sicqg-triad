@@ -120,10 +120,13 @@ def run_demo() -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="sicqg_triad.cli")
-    parser.add_argument("--task", default="demo", choices=["demo"])
+    parser.add_argument("--task", default="demo", choices=["demo", "torsion"])
     args = parser.parse_args()
     if args.task == "demo":
         run_demo()
+    elif args.task == "torsion":
+        from examples.torsion.run import run_torsion
+        run_torsion()
 
 
 if __name__ == "__main__":

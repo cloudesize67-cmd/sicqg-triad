@@ -8,11 +8,12 @@ version = "0.1.0"
 description = "Triadic self-improving architecture: superposition registry + formal gate + quality-diversity archive"
 requires-python = ">=3.10"
 dependencies = [
+    "z3-solver",
+    "numpy>=2.0",
     "requests",
 ]
 
 [project.optional-dependencies]
-z3 = ["z3-solver"]
 dev = ["pytest"]
 
 [project.scripts]
