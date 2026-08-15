@@ -28,11 +28,24 @@ from typing import Callable
 from .map_elites import Elite
 from .router import route
 from .superposition import Variant
+from .telemetry import TelemetryEvent
 
 # Matches ```python ... ``` or plain ``` ... ``` fenced blocks.
 _FENCE_RE = re.compile(r"```(?:python)?\s*\n(.*?)```", re.DOTALL)
 
 _DEFAULT_GATE_INPUTS = [{"x": i} for i in range(3)]
+
+
+def _mean_pairwise_dist(a: list[tuple[float, ...]],
+                        b: list[tuple[float, ...]]) -> float:
+    """Mean Euclidean distance over all (x, y) pairs in a x b."""
+    if not a or not b:
+        return 0.0
+    total = 0.0
+    for x in a:
+        for y in b:
+            total += sum((p - q) ** 2 for p, q in zip(x, y)) ** 0.5
+    return total / (len(a) * len(b))
 
 
 def _parse_code(text: str) -> str:
@@ -41,6 +54,22 @@ def _parse_code(text: str) -> str:
     if blocks:
         return "\n\n".join(b.strip() for b in blocks if b.strip())
     return text.strip()
+
+
+def hitl_prompt_policy(payload: dict) -> bool:
+    """Human-in-the-loop commit policy: print payload, prompt on stdin.
+
+    Approves only on an explicit "y"/"yes"; anything else (including EOF
+    or empty input) blocks the commit.
+    """
+    print("HITL commit gate — payload:")
+    for k, v in payload.items():
+        print(f"  {k}: {v}")
+    try:
+        answer = input("Approve commit? [y/N] ").strip().lower()
+    except EOFError:
+        answer = ""
+    return answer in ("y", "yes")
 
 
 class Orchestrator:
@@ -65,6 +94,17 @@ class Orchestrator:
         Optional MAP-Elites descriptor override: (variant, train_fitness)
         -> behavior descriptor tuple. Defaults to squashed train fitness +
         normalized code length.
+    commit_policy : Callable[[dict], bool] | None
+        Optional human-in-the-loop circuit breaker. Called before the
+        stage-5 commit with payload {"best_id", "fitness_train",
+        "fatal_count", "generations"}; returning False blocks the commit
+        (result["commit_blocked"] is set True and the best variant stays
+        "verified" instead of "committed"). None (default) = auto-approve,
+        the historical behavior.
+    telemetry : TelemetryLogger | None
+        Optional telemetry sink; one TelemetryEvent is logged per
+        generation and demand() includes "telemetry_summary" in its
+        result when a logger is present.
     """
 
     def __init__(self, registry, archive, gate, executor, provider,
@@ -72,7 +112,9 @@ class Orchestrator:
                  proposer: Callable[[str, int, list[str]],
                                     list[tuple[str, list[str], str]]] | None = None,
                  descriptor_fn: Callable[[Variant, float],
-                                         tuple[float, ...]] | None = None):
+                                         tuple[float, ...]] | None = None,
+                 commit_policy: Callable[[dict], bool] | None = None,
+                 telemetry=None):
         self.registry = registry
         self.archive = archive
         self.gate = gate
@@ -81,6 +123,8 @@ class Orchestrator:
         self.evaluator = evaluator
         self.proposer = proposer
         self.descriptor_fn = descriptor_fn
+        self.commit_policy = commit_policy
+        self.telemetry = telemetry
 
     # ------------------------------------------------------------- stage 1
     def _propose(self, task: str, generation: int, n: int,
@@ -148,8 +192,10 @@ class Orchestrator:
             [{"x": s} for s in train] or list(_DEFAULT_GATE_INPUTS))
         fatal_count = 0
         xover_parents: list = []  # elites chosen for crossover next gen
+        prev_gen_descriptors: list[tuple[float, ...]] = []
 
         for gen in range(generations):
+            fatal_before = fatal_count
             # ---- stage 1: propose -------------------------------------
             variants = self._propose(task, gen, n_variants, feedback)
             # mutations of the current best elite descend from it
@@ -206,10 +252,12 @@ class Orchestrator:
                        f"fatal {fatal_count} cumulative")
 
             # ---- stage 4: score + archive + crossover -----------------
+            gen_descriptors: list[tuple[float, ...]] = []
             for v in survivors:
                 fitness = float(self.evaluator(v.code, heldout))
                 v.metadata["fitness_heldout"] = fitness
                 train_fit = float(self.evaluator(v.code, train))
+                v.metadata["fitness_train"] = train_fit
                 if self.descriptor_fn is not None:
                     descriptors = tuple(self.descriptor_fn(v, train_fit))
                 else:
@@ -220,6 +268,7 @@ class Orchestrator:
                 island = int(v.id[:8], 16) % self.archive.n_islands
                 self.archive.add(Elite(variant_id=v.id, fitness=fitness,
                                        descriptors=descriptors, island=island))
+                gen_descriptors.append(descriptors)
 
             if gen < generations - 1:
                 xover_parents = self.archive.sample_parents(
@@ -228,23 +277,64 @@ class Orchestrator:
                     log.append(f"gen {gen}: crossover parents selected for "
                                f"next generation")
 
+            # ---- telemetry (one event per generation) ------------------
+            if self.telemetry is not None:
+                drift = (_mean_pairwise_dist(gen_descriptors,
+                                             prev_gen_descriptors)
+                         if gen > 0 else 0.0)
+                best_now = self.archive.best()
+                self.telemetry.log(TelemetryEvent(
+                    generation=gen,
+                    n_proposed=len(variants),
+                    n_fatal=fatal_count - fatal_before,
+                    archive_coverage=self.archive.coverage(),
+                    best_fitness=(best_now.fitness if best_now is not None
+                                  else float("-inf")),
+                    descriptor_drift=drift))
+            prev_gen_descriptors = gen_descriptors
+
         # ---- stage 5: commit best, prune obsolete -----------------------
         best = self.archive.best()
         best_id = None
         fitness_heldout = float("-inf")
+        commit_blocked = False
         if best is not None:
             best_id = best.variant_id
             fitness_heldout = best.fitness
-            self.registry.update_status(best_id, "committed")
-            log.append(f"committed {best_id[:8]} "
-                       f"fitness_heldout={fitness_heldout}")
-        removed = self.registry.prune({"committed", "superposed"})
+            if self.commit_policy is not None:
+                best_variant = self.registry.get(best_id)
+                train_fit = float(best_variant.metadata.get(
+                    "fitness_train", float("nan")))
+                approved = bool(self.commit_policy({
+                    "best_id": best_id,
+                    "fitness_train": train_fit,
+                    "fatal_count": fatal_count,
+                    "generations": generations,
+                }))
+            else:
+                approved = True
+            if approved:
+                self.registry.update_status(best_id, "committed")
+                log.append(f"committed {best_id[:8]} "
+                           f"fitness_heldout={fitness_heldout}")
+            else:
+                # circuit breaker tripped: best stays verified, no commit
+                commit_blocked = True
+                self.registry.update_status(best_id, "verified")
+                log.append(f"commit BLOCKED by commit_policy for "
+                           f"{best_id[:8]}; best stays verified")
+        removed = self.registry.prune({"committed", "superposed", "verified"})
         log.append(f"pruned {removed} obsolete variants")
 
-        return {
+        result = {
             "best_id": best_id,
             "fitness_heldout": fitness_heldout,
             "archive_coverage": self.archive.coverage(),
             "fatal_count": fatal_count,
             "log": log,
         }
+        if commit_blocked:
+            result["commit_blocked"] = True
+        if self.telemetry is not None:
+            result["telemetry_summary"] = self.telemetry.summary()
+        return result
