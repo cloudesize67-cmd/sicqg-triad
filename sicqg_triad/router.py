@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from dataclasses import dataclass
 from typing import Protocol
 
 import requests
@@ -60,6 +61,59 @@ class GeminiFreeProvider:
             for cand in data.get("candidates", [])
             for part in cand.get("content", {}).get("parts", [])
         )
+
+
+@dataclass
+class Budget:
+    """Economic governance cap for an LLM provider."""
+    max_calls: int
+    max_est_cost_usd: float
+
+
+class BudgetExhausted(Exception):
+    """Raised by BudgetedProvider when a budget cap would be exceeded.
+
+    Propagates out of Orchestrator.demand() and aborts the run honestly —
+    no silent fallbacks, no partial results presented as complete.
+    """
+
+
+class BudgetedProvider:
+    """Wraps any LLMProvider with call-count and cost caps.
+
+    ``cost_per_call_usd`` defaults to 0.0 (free tier), in which case only
+    the call cap applies. The budget is checked BEFORE each call: the call
+    that would exceed the cap raises ``BudgetExhausted`` and is never
+    executed.
+    """
+
+    def __init__(self, provider, budget: Budget,
+                 cost_per_call_usd: float = 0.0) -> None:
+        self.provider = provider
+        self.budget = budget
+        self.cost_per_call_usd = float(cost_per_call_usd)
+        self.calls = 0
+
+    def complete(self, prompt: str, thinking_budget: int) -> str:
+        if self.calls + 1 > self.budget.max_calls:
+            raise BudgetExhausted(
+                f"call cap reached: {self.calls}/{self.budget.max_calls}")
+        if ((self.calls + 1) * self.cost_per_call_usd
+                > self.budget.max_est_cost_usd):
+            raise BudgetExhausted(
+                f"cost cap reached: est ${(self.calls + 1) * self.cost_per_call_usd:.6f}"
+                f" > ${self.budget.max_est_cost_usd:.6f}")
+        self.calls += 1
+        return self.provider.complete(prompt, thinking_budget)
+
+    def spent(self) -> dict:
+        """Current spend: {calls, max_calls, est_cost_usd, max_est_cost_usd}."""
+        return {
+            "calls": self.calls,
+            "max_calls": self.budget.max_calls,
+            "est_cost_usd": self.calls * self.cost_per_call_usd,
+            "max_est_cost_usd": self.budget.max_est_cost_usd,
+        }
 
 
 _COMPLEX_WORDS = (

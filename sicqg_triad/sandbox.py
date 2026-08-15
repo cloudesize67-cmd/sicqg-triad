@@ -1,4 +1,24 @@
-"""Executor interface + local subprocess sandbox backend."""
+"""Executor interface + sandbox backends.
+
+Multi-cloud resiliency (adapter ladder)
+---------------------------------------
+The ``Executor`` interface (``run(code, timeout_s) -> ExecResult``) is
+deliberately vendor-neutral. Isolation strength ascends a failover
+ladder, and switching providers means swapping ONE adapter class — no
+vendor-specific code ever leaks into the orchestrator:
+
+  1. ``LocalSubprocessExecutor`` — dev/CI fallback (rlimits, scrubbed
+     env; bwrap -> proot -> honest-warning confinement ladder).
+  2. bwrap/proot confinement — best-effort local filesystem isolation.
+  3. ``E2BExecutor`` — Firecracker microVMs (stub; needs the e2b SDK).
+  4. ``ModalExecutor`` — gVisor-isolated containers (stub; needs modal).
+
+If a cloud provider is unavailable or a quota is exhausted, fail over by
+constructing the next adapter down the ladder and re-injecting it — the
+executor interface is the only contract. Hardware attestation (future
+AWS Nitro / KMS work) belongs in a NEW adapter class implementing the
+same interface, never in core orchestration code.
+"""
 from __future__ import annotations
 
 import os
