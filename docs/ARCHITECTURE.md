@@ -36,6 +36,46 @@ in process memory; `TokenSet.__repr__` redacts; the module performs zero file I/
 | `mcp_auth.py` | Zero-trust tool auth | Full PKCE flow against any compliant AS; no secrets on disk, ever |
 | `cli.py` | Demo | `python -m sicqg_triad.cli --task demo` |
 
+## Governance layer
+
+- **HITL circuit breaker** — `Orchestrator(commit_policy=...)` gates the
+  stage-5 commit on a human/policy decision (payload: best_id,
+  fitness_train, fatal_count, generations). A False verdict sets
+  `commit_blocked` in the result and the best variant stays `verified`;
+  `None` preserves the historical auto-approve behavior. The demos expose
+  it via `--hitl`.
+- **Telemetry** — `telemetry.py` logs one `TelemetryEvent` per generation
+  (n_proposed, n_fatal, archive_coverage, best_fitness, descriptor_drift =
+  mean pairwise distance of elite descriptors vs the previous generation,
+  0 for gen 0) to an optional JSONL sink; `TelemetryLogger.summary()`
+  aggregates fatal_rate / coverage_trend / max_drift and rides along in
+  `demand()`'s result as `telemetry_summary`.
+- **Economic governance** — `router.BudgetedProvider` wraps any
+  `LLMProvider` with a `Budget(max_calls, max_est_cost_usd)`; the call
+  that would exceed a cap raises `BudgetExhausted`, which propagates out
+  of `demand()` and aborts the run honestly (no silent fallback).
+  `cost_per_call_usd=0.0` models the free tier (call cap only).
+
+## Infrastructure Failover
+
+Execution isolation ascends an adapter ladder with a single
+vendor-neutral interface (`Executor.run(code, timeout_s) -> ExecResult`):
+
+```
+LocalSubprocessExecutor  (rlimits, scrubbed env)
+  -> bwrap / proot confinement       (best local filesystem isolation)
+    -> E2BExecutor                   (Firecracker microVMs; stub)
+      -> ModalExecutor               (gVisor containers; stub)
+```
+
+There is no vendor-specific code in the executor interface or the
+orchestrator: switching providers is constructing a different adapter
+class and injecting it. Failover when a provider is unavailable or over
+quota = move down the ladder and state which guarantees were lost.
+Hardware attestation (future AWS Nitro / KMS work) belongs in a NEW
+adapter implementing the same interface — never in core orchestration
+code.
+
 ## The standing engineering law
 
 Credibility = demonstrated prediction against independent ground truth.

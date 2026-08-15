@@ -112,3 +112,23 @@ committed: bandpass fc_low=3.8 fc_high=5.74 taps=1201 window=hann notch=0
   a guarded `__import__` that only resolves whitelisted modules. For the
   torsion task, isolation comes from the sandbox executor stage; the gate
   namespace relaxation is documented in `examples/torsion/run.py`.
+
+## Governance layer (appended)
+
+With the governance upgrades (HITL circuit breaker, telemetry, budget
+caps, failover docs, bootstrap prompt v2) the suite is now:
+
+```
+python -m pytest tests -q
+63 passed, 1 skipped in ~24s
+```
+
+`tests/test_governance.py` (9 tests): commit_policy=False blocks the
+commit and sets `commit_blocked` (best stays `verified`); default policy
+auto-approves; telemetry logs one event per generation with correct
+summary math and JSONL roundtrip; `BudgetedProvider` raises
+`BudgetExhausted` past call/cost caps, never raises on the free-tier
+zero-cost path within `max_calls`, and reports `spent()` correctly; e2e
+demo run with telemetry + blocking policy completes the search honestly.
+Both demos produce unchanged scores (533.0/56949.0 and 6.201/24.535)
+with the telemetry summary now printed.

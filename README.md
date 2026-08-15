@@ -130,6 +130,33 @@ evaluator file is byte-identical to upstream below its provenance header
 (requires numpy >= 2.0 for `np.trapezoid`; on Termux use
 `pkg install python-numpy`, which ships numpy 2.x).
 
+## Governance layer
+
+Four upgrades make the loop operable under human and economic oversight:
+
+1. **HITL circuit breaker** — `Orchestrator(commit_policy=fn)`: before the
+   stage-5 commit, `fn({"best_id", "fitness_train", "fatal_count",
+   "generations"})` must approve, or the commit is blocked and the best
+   variant stays `verified` (`result["commit_blocked"] == True`).
+   `python -m sicqg_triad.cli --task demo --hitl` prompts
+   `Approve commit? [y/N]` on stdin.
+2. **Telemetry** (`telemetry.py`) — `TelemetryLogger(path)` records one
+   `TelemetryEvent` per generation (proposed/fatal/coverage/best fitness/
+   descriptor drift) to JSONL; `demand()` returns `telemetry_summary`.
+3. **Economic governance** (`router.py`) — `BudgetedProvider(provider,
+   Budget(max_calls=100, max_est_cost_usd=1.0), cost_per_call_usd=0.01)`
+   wraps any provider and raises `BudgetExhausted` when a cap would be
+   exceeded; the exception propagates and aborts the run honestly.
+   `spent()` reports current usage.
+4. **Multi-cloud resiliency** — the executor adapter ladder
+   Local → bwrap/proot → E2B (Firecracker) → Modal (gVisor): failover is
+   swapping one adapter class; future Nitro/KMS attestation lands as a new
+   adapter, never in core. See `docs/ARCHITECTURE.md`.
+
+The bootstrap prompt `prompts/level0_bootstrap_v2.xml` rewrites the SICQG
+level-0 prompt honestly: vocabulary vs mechanisms, a capability
+declaration, honesty invariants, and explicit failure states.
+
 ## Install
 
 ### Regular Python
