@@ -26,10 +26,11 @@ import tempfile
 import numpy as np
 
 from sicqg_triad.map_elites import CVTMapElites
-from sicqg_triad.orchestrator import Orchestrator
+from sicqg_triad.orchestrator import Orchestrator, hitl_prompt_policy
 from sicqg_triad.router import StubProvider
 from sicqg_triad.sandbox import LocalSubprocessExecutor
 from sicqg_triad.superposition import SuperpositionRegistry, Variant
+from sicqg_triad.telemetry import TelemetryLogger
 from sicqg_triad.z3_gate import Z3Gate
 
 from . import evaluator as ev
@@ -98,16 +99,21 @@ def descriptors(v: Variant, train_fit: float) -> tuple[float, float]:
     return (train_fit / (1.0 + abs(train_fit)), min(dist, 1.0))
 
 
-def run_torsion(verbose: bool = True, proposer_fn=proposer) -> dict:
+def run_torsion(verbose: bool = True, proposer_fn=proposer,
+                hitl: bool = False) -> dict:
     registry = SuperpositionRegistry(
         tempfile.mktemp(prefix="sicqg_torsion_registry_", suffix=".jsonl"))
     archive = CVTMapElites(n_niches=8, n_islands=2, descriptor_dim=2, seed=0)
     gate = Z3Gate(allowed_modules=("numpy",))  # relaxed: isolation=sandbox
     executor = LocalSubprocessExecutor()
+    telemetry = TelemetryLogger(
+        tempfile.mktemp(prefix="sicqg_torsion_telemetry_", suffix=".jsonl"))
     orch = Orchestrator(
         registry=registry, archive=archive, gate=gate, executor=executor,
         provider=StubProvider(), evaluator=torsion_evaluator,
-        proposer=proposer_fn, descriptor_fn=descriptors)
+        proposer=proposer_fn, descriptor_fn=descriptors,
+        commit_policy=hitl_prompt_policy if hitl else None,
+        telemetry=telemetry)
 
     result = orch.demand(TASK, n_variants=5, generations=3,
                          train_seeds=ev.TRAIN_SEEDS,
@@ -142,6 +148,9 @@ def run_torsion(verbose: bool = True, proposer_fn=proposer) -> dict:
             print(f"fatally-penalized variants:     {result['fatal_count']}")
             print(f"archive coverage:               "
                   f"{result['archive_coverage']:.2%}")
+            if result.get("commit_blocked"):
+                print("commit BLOCKED by HITL policy; best stays verified")
+            print(f"telemetry summary: {result['telemetry_summary']}")
             print(f"committed variant ({best.mutation_op}):\n{best.code}")
     return out
 
@@ -169,7 +178,12 @@ def apply_filter(x, fs):
 
 
 def main() -> None:
-    run_torsion()
+    import argparse
+    parser = argparse.ArgumentParser(prog="examples.torsion.run")
+    parser.add_argument("--hitl", action="store_true",
+                        help="require human approval before the stage-5 commit")
+    args = parser.parse_args()
+    run_torsion(hitl=args.hitl)
 
 
 if __name__ == "__main__":

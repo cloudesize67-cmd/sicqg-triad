@@ -18,8 +18,9 @@ import random
 import tempfile
 
 from .map_elites import CVTMapElites
-from .orchestrator import Orchestrator
+from .orchestrator import Orchestrator, hitl_prompt_policy
 from .router import StubProvider
+from .telemetry import TelemetryLogger
 from .sandbox import LocalSubprocessExecutor
 from .superposition import SuperpositionRegistry
 from .z3_gate import Z3Gate, _SAFE_BUILTINS
@@ -89,17 +90,21 @@ def demo_proposer(task: str, generation: int,
     return [(c, inv, "point") for c in pool]
 
 
-def run_demo() -> dict:
+def run_demo(hitl: bool = False) -> dict:
     """Run the full 5-stage loop on the toy problem; print a summary."""
     registry = SuperpositionRegistry(
         tempfile.mktemp(prefix="sicqg_registry_", suffix=".jsonl"))
     archive = CVTMapElites(n_niches=8, n_islands=2, descriptor_dim=2, seed=0)
     gate = Z3Gate()
     executor = LocalSubprocessExecutor()
+    telemetry = TelemetryLogger(
+        tempfile.mktemp(prefix="sicqg_telemetry_", suffix=".jsonl"))
     orch = Orchestrator(
         registry=registry, archive=archive, gate=gate, executor=executor,
         provider=StubProvider(), evaluator=demo_evaluator,
-        proposer=demo_proposer)
+        proposer=demo_proposer,
+        commit_policy=hitl_prompt_policy if hitl else None,
+        telemetry=telemetry)
 
     baseline = demo_evaluator(BASELINE_CODE, HELDOUT_SEEDS)
     result = orch.demand(TASK, n_variants=4, generations=3,
@@ -112,6 +117,9 @@ def run_demo() -> dict:
     print(f"best held-out fitness:               {result['fitness_heldout']}")
     print(f"archive coverage:                    {result['archive_coverage']:.2%}")
     print(f"fatally-penalized variants:          {result['fatal_count']}")
+    if result.get("commit_blocked"):
+        print("commit BLOCKED by HITL policy; best variant stays verified")
+    print(f"telemetry summary: {result['telemetry_summary']}")
     if result["best_id"]:
         best = registry.get(result["best_id"])
         print(f"committed variant ({best.mutation_op}):\n{best.code}")
@@ -121,12 +129,14 @@ def run_demo() -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(prog="sicqg_triad.cli")
     parser.add_argument("--task", default="demo", choices=["demo", "torsion"])
+    parser.add_argument("--hitl", action="store_true",
+                        help="require human approval before the stage-5 commit")
     args = parser.parse_args()
     if args.task == "demo":
-        run_demo()
+        run_demo(hitl=args.hitl)
     elif args.task == "torsion":
         from examples.torsion.run import run_torsion
-        run_torsion()
+        run_torsion(hitl=args.hitl)
 
 
 if __name__ == "__main__":
