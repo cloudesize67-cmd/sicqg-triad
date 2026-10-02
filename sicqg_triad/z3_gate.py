@@ -28,6 +28,10 @@ try:
 except ImportError:  # degraded mode: concrete-only checking, noted in logs
     z3 = None
 
+# Public flag: True when the z3 binding imported successfully. Tests and
+# callers use this to skip symbolic-proof expectations on z3-less hosts.
+Z3_AVAILABLE = z3 is not None
+
 # Exception types raised by the z3 binding (empty when z3 is absent).
 _Z3_EXC = (z3.Z3Exception,) if z3 is not None else ()
 
@@ -455,6 +459,10 @@ class Z3Gate:
             lo, hi = min(int_results), max(int_results)
             pad = max(1, int(abs(hi - lo)))
             domain["result"] = (int(lo) - pad, int(hi) + pad)
+
+        if z3 is None:
+            log.append("z3 unavailable: symbolic proof skipped; "
+                       "concrete checks only")
 
         for inv in invariants:
             # 1) concrete check on every run (test inputs AND probes)
